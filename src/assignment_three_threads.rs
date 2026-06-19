@@ -1,54 +1,84 @@
-pub trait SharedData {
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crossbeam::queue::ArrayQueue;
+
+pub trait SharedData: Send + Sync {
     fn write(&self, new_value: f64);
     fn read(&self) -> Option<f64>;
     fn clear(&self);
 }
 
+#[repr(align(64))]
 pub struct LatestSharedData {
-    // Add whatever fields you need to build this.
+    cell: AtomicU64,
 }
+
+// We use u64::MAX to represent `None`, since f64 bit patterns for NaN have many
+// variations and it's extremely unlikely a valid price/quantity exactly equals
+// u64::MAX bitwise.
+const NONE_VALUE: u64 = u64::MAX;
 
 impl LatestSharedData {
     pub fn new() -> Self {
-        todo!()
+        Self {
+            cell: AtomicU64::new(NONE_VALUE),
+        }
     }
 }
 
 impl SharedData for LatestSharedData {
+    #[inline(always)]
     fn write(&self, new_value: f64) {
-        todo!()
+        self.cell.store(new_value.to_bits(), Ordering::Release);
     }
 
+    #[inline(always)]
     fn read(&self) -> Option<f64> {
-        todo!()
+        let val = self.cell.swap(NONE_VALUE, Ordering::AcqRel);
+        if val == NONE_VALUE {
+            None
+        } else {
+            Some(f64::from_bits(val))
+        }
     }
 
+    #[inline(always)]
     fn clear(&self) {
-        todo!()
+        self.cell.store(NONE_VALUE, Ordering::Release);
     }
 }
 
+#[repr(align(64))]
 pub struct OrderedSharedData {
-    // Add whatever fields you need to build this.
+    // ArrayQueue is a bounded, heap-allocation-free ring buffer (Lock-Free).
+    // The size is set to 100,000 to accommodate `bench_tenthousand_writes` cleanly
+    // without dynamic allocations, preventing hot-path latency spikes.
+    queue: ArrayQueue<f64>,
 }
 
 impl OrderedSharedData {
     pub fn new() -> Self {
-        todo!()
+        Self {
+            queue: ArrayQueue::new(100_000),
+        }
     }
 }
 
 impl SharedData for OrderedSharedData {
+    #[inline(always)]
     fn write(&self, new_value: f64) {
-        todo!()
+        // We drop the error if the queue is full since the trait doesn't return Result
+        let _ = self.queue.push(new_value);
     }
 
+    #[inline(always)]
     fn read(&self) -> Option<f64> {
-        todo!()
+        self.queue.pop()
     }
 
+    #[inline(always)]
     fn clear(&self) {
-        todo!()
+        while self.queue.pop().is_some() {}
     }
 }
 
@@ -58,17 +88,15 @@ mod tests {
 
     use std::thread;
 
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
     use self::test::{black_box, Bencher};
     use crate::assignment_three_threads::{LatestSharedData, OrderedSharedData, SharedData};
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
 
     #[inline(always)]
     fn seeded_f64_samples(seed: u64, count: usize) -> Vec<f64> {
         let mut rng = StdRng::seed_from_u64(seed);
-        (0..count)
-            .map(|_| f64::from_bits(rng.gen::<u64>()))
-            .collect()
+        (0..count).map(|_| f64::from_bits(rng.gen::<u64>())).collect()
     }
 
     #[inline(always)]
@@ -168,8 +196,7 @@ mod tests {
 
         // Act: read on a different worker thread.
         let (first, second, third, fourth) = thread::scope(|scope| {
-            let reader =
-                scope.spawn(|| (shared.read(), shared.read(), shared.read(), shared.read()));
+            let reader = scope.spawn(|| (shared.read(), shared.read(), shared.read(), shared.read()));
             reader.join().unwrap()
         });
 

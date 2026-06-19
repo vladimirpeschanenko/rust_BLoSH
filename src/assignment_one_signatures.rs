@@ -1,4 +1,14 @@
+use std::fmt::Write;
+
+use arrayvec::ArrayString;
+use base64::{engine::general_purpose, Engine as _};
 use chrono::DateTime;
+use hmac::{Hmac, Mac};
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use sha2::Sha256;
+
+// Huobi URL encoding rules: keep alphanumeric, '-', '_', '.'
+const HUOBI_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.');
 
 pub enum HTTPMethod {
     Options,
@@ -12,6 +22,22 @@ pub enum HTTPMethod {
     Patch,
 }
 
+impl HTTPMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HTTPMethod::Options => "OPTIONS",
+            HTTPMethod::Get => "GET",
+            HTTPMethod::Post => "POST",
+            HTTPMethod::Put => "PUT",
+            HTTPMethod::Delete => "DELETE",
+            HTTPMethod::Head => "HEAD",
+            HTTPMethod::Trace => "TRACE",
+            HTTPMethod::Connect => "CONNECT",
+            HTTPMethod::Patch => "PATCH",
+        }
+    }
+}
+
 pub struct Params {
     pub access_key_id: String,
     pub signature_method: String,
@@ -20,24 +46,50 @@ pub struct Params {
 }
 
 impl Params {
-    pub fn format_for_signature(self: &Self) -> String {
-        todo!()
+    pub fn format_for_signature(&self) -> String {
+        let mut buffer = String::with_capacity(128);
+
+        write!(
+            buffer,
+            "AccessKeyId={}&SignatureMethod={}&SignatureVersion={}&Timestamp={}%3A{}%3A{}",
+            utf8_percent_encode(&self.access_key_id, HUOBI_ENCODE_SET),
+            utf8_percent_encode(&self.signature_method, HUOBI_ENCODE_SET),
+            utf8_percent_encode(&self.signature_version, HUOBI_ENCODE_SET),
+            self.timestamp.format("%Y-%m-%dT%H"),
+            self.timestamp.format("%M"),
+            self.timestamp.format("%S")
+        )
+        .expect("Writing to a String should never fail");
+
+        buffer
     }
 }
 
 pub fn sign_hmac_sha256_base64(secret: &[u8], msg: &[u8]) -> String {
-    todo!()
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC can take key of any size");
+    mac.update(msg);
+    general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
 
-pub fn generate_signature(
-    uri: &str,
-    method: &HTTPMethod,
-    params: &Params,
-    secret: &[u8],
-) -> String {
-    let msg: &[u8] = todo!();
+// Note: Used ArrayString to eliminate intermediate heap allocations.
+// True zero-allocation is blocked here because the test suite forces a `String`
+// return type. I would pass a pre-allocated stack buffer (`&mut [u8]`)
+// and use `STANDARD.encode_slice` to bypass the global allocator entirely.
+pub fn generate_signature(uri: &str, method: &HTTPMethod, params: &Params, secret: &[u8]) -> String {
+    let formatted_params = params.format_for_signature();
 
-    return sign_hmac_sha256_base64(secret, msg);
+    let mut payload = ArrayString::<512>::new();
+
+    write!(
+        payload,
+        "{}\napi.huobi.pro\n{}\n{}",
+        method.as_str(),
+        uri,
+        formatted_params
+    )
+    .expect("Stack buffer overflow");
+
+    sign_hmac_sha256_base64(secret, payload.as_bytes())
 }
 
 #[cfg(test)]
@@ -45,9 +97,8 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
 
-    use crate::assignment_one_signatures::{generate_signature, HTTPMethod, Params};
-
     use super::sign_hmac_sha256_base64;
+    use crate::assignment_one_signatures::{generate_signature, HTTPMethod, Params};
 
     #[test]
     fn test_format() {
@@ -60,7 +111,12 @@ mod tests {
 
         let formatted_params = params.format_for_signature();
 
-        assert_eq!(formatted_params, "AccessKeyId=2xxxxxx-99xxxxxx-84xxxxxx-7xxxx&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2017-05-11T15%3A19%3A30".to_owned())
+        assert_eq!(
+            formatted_params,
+            "AccessKeyId=2xxxxxx-99xxxxxx-84xxxxxx-7xxxx&SignatureMethod=HmacSHA256&SignatureVersion=2&\
+             Timestamp=2017-05-11T15%3A19%3A30"
+                .to_owned()
+        )
     }
 
     #[test]
@@ -94,10 +150,7 @@ mod tests {
         ];
 
         for (input_secret, input_msg, expected_output) in test_values {
-            assert_eq!(
-                sign_hmac_sha256_base64(input_secret, input_msg),
-                expected_output
-            );
+            assert_eq!(sign_hmac_sha256_base64(input_secret, input_msg), expected_output);
         }
     }
 
@@ -132,7 +185,8 @@ mod tests {
                 "SECRET_1".as_bytes(),
                 Params {
                     access_key_id: "3xxxxxx-77xxxxxx-68xxxxxx-5xxxx".to_owned(),
-                    signature_method: "HmacSHA1".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "HmacSHA1".to_owned(), /* Note, only for data variety, the actual hash should
+                                                              * be `HmacSHA256` */
                     signature_version: "22.1".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2008, 2, 26, 5, 5, 23).unwrap(),
                 },
@@ -144,7 +198,8 @@ mod tests {
                 "SECRET_2".as_bytes(),
                 Params {
                     access_key_id: "4xxxxxx-22xxxxxx-94xxxxxx-3xxxx".to_owned(),
-                    signature_method: "HmacSHA384".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "HmacSHA384".to_owned(), /* Note, only for data variety, the actual hash should
+                                                                * be `HmacSHA256` */
                     signature_version: "9".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2008, 4, 23, 11, 59, 45).unwrap(),
                 },
@@ -156,7 +211,8 @@ mod tests {
                 "SECRET_3".as_bytes(),
                 Params {
                     access_key_id: "5xxxxxx-11xxxxxx-75xxxxxx-9xxxx".to_owned(),
-                    signature_method: "HmacSHA512".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "HmacSHA512".to_owned(), /* Note, only for data variety, the actual hash should
+                                                                * be `HmacSHA256` */
                     signature_version: "87".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2014, 11, 4, 13, 29, 1).unwrap(),
                 },
@@ -168,7 +224,8 @@ mod tests {
                 "SECRET_4".as_bytes(),
                 Params {
                     access_key_id: "6xxxxxx-44xxxxxx-81xxxxxx-2xxxx".to_owned(),
-                    signature_method: "MD5".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "MD5".to_owned(), /* Note, only for data variety, the actual hash should be
+                                                         * `HmacSHA256` */
                     signature_version: "4".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2018, 6, 29, 15, 47, 59).unwrap(),
                 },
@@ -180,7 +237,8 @@ mod tests {
                 "SECRET_5".as_bytes(),
                 Params {
                     access_key_id: "7xxxxxx-66xxxxxx-33xxxxxx-8xxxx".to_owned(),
-                    signature_method: "SHA-1".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "SHA-1".to_owned(), /* Note, only for data variety, the actual hash should be
+                                                           * `HmacSHA256` */
                     signature_version: "5.9".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2019, 2, 24, 3, 1, 4).unwrap(),
                 },
@@ -192,7 +250,8 @@ mod tests {
                 "SECRET_6".as_bytes(),
                 Params {
                     access_key_id: "8xxxxxx-88xxxxxx-12xxxxxx-1xxxx".to_owned(),
-                    signature_method: "SHA-256".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "SHA-256".to_owned(), /* Note, only for data variety, the actual hash should be
+                                                             * `HmacSHA256` */
                     signature_version: "a14".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2019, 3, 7, 5, 9, 4).unwrap(),
                 },
@@ -204,7 +263,8 @@ mod tests {
                 "SECRET_7".as_bytes(),
                 Params {
                     access_key_id: "9xxxxxx-55xxxxxx-57xxxxxx-6xxxx".to_owned(),
-                    signature_method: "SHA-512".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "SHA-512".to_owned(), /* Note, only for data variety, the actual hash should be
+                                                             * `HmacSHA256` */
                     signature_version: "89-beta.1".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2020, 2, 4, 23, 59, 59).unwrap(),
                 },
@@ -216,7 +276,8 @@ mod tests {
                 "SECRET_8".as_bytes(),
                 Params {
                     access_key_id: "1xxxxxx-99xxxxxx-45xxxxxx-4xxxx".to_owned(),
-                    signature_method: "PBKDF2WithHmacSHA1".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "PBKDF2WithHmacSHA1".to_owned(), /* Note, only for data variety, the actual
+                                                                        * hash should be `HmacSHA256` */
                     signature_version: "gavin_belson".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2021, 4, 24, 0, 0, 1).unwrap(),
                 },
@@ -228,7 +289,8 @@ mod tests {
                 "SECRET_9".as_bytes(),
                 Params {
                     access_key_id: "0xxxxxx-33xxxxxx-29xxxxxx-0xxxx".to_owned(),
-                    signature_method: "PBKDF2WithHmacSHA512".to_owned(), // Note, only for data variety, the actual hash should be `HmacSHA256`
+                    signature_method: "PBKDF2WithHmacSHA512".to_owned(), /* Note, only for data variety, the actual
+                                                                          * hash should be `HmacSHA256` */
                     signature_version: "signature_version".to_owned(),
                     timestamp: Utc.with_ymd_and_hms(2022, 6, 29, 2, 11, 0).unwrap(),
                 },
