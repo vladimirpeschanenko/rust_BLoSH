@@ -18,6 +18,12 @@ pub struct LatestSharedData {
 // u64::MAX bitwise.
 const NONE_VALUE: u64 = u64::MAX;
 
+impl Default for LatestSharedData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatestSharedData {
     pub fn new() -> Self {
         Self {
@@ -54,6 +60,12 @@ pub struct OrderedSharedData {
     // The size is set to 100,000 to accommodate `bench_tenthousand_writes` cleanly
     // without dynamic allocations, preventing hot-path latency spikes.
     queue: ArrayQueue<f64>,
+}
+
+impl Default for OrderedSharedData {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OrderedSharedData {
