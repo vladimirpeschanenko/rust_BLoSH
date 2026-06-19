@@ -1,0 +1,17 @@
+[package]
+name = "assignment"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+chrono = "0.4.26"
+rust_decimal = "1.29.1"
+rust_decimal_macros = "1.29.1"
+
+# Feel free to add any dependencies you want to use!
+
+[dev-dependencies]
+rand = "0.8.5"
